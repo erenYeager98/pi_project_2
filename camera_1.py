@@ -1,27 +1,61 @@
-# This file has to be run under /home/camera1 on the camera1 pi.
 import socket
-import cv2
+import io
+from threading import Condition
 from picamera2 import Picamera2
+from picamera2.encoders import JpegEncoder
+from picamera2.outputs import FileOutput
 
-def send_stream():
-    server_socket = socket.socket()
-    server_socket.bind(('0.0.0.0', 8000))
-    server_socket.listen(0)
+class StreamingOutput(io.BufferedIOBase):
+    def __init__(self):
+        self.frame = None
+        self.condition = Condition()
 
-    connection = server_socket.accept()[0].makefile('wb')
+    def write(self, buf):
+        with self.condition:
+            self.frame = buf
+            self.condition.notify_all()
+
+def start_streaming_server():
+    # Set up the camera
     picam2 = Picamera2()
-    picam2.configure(picam2.create_video_configuration(main={"size": (640, 480)}))
-    picam2.start()
+    picam2.configure(picam2.create_video_configuration(main={"size": (640, 480)},controls={"FrameRate":1}))
+    output = StreamingOutput()
+    picam2.start_recording(JpegEncoder(), FileOutput(output))
 
-    try:
-        while True:
-            frame = picam2.capture_array()
-            _, buffer = cv2.imencode('.jpg', frame)
-            connection.write(len(buffer).to_bytes(4, byteorder='big'))
-            connection.write(buffer.tobytes())
-    finally:
-        connection.close()
-        server_socket.close()
+    while True:
+        try:
+            # Set up a TCP server
+            server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server_socket.bind(('0.0.0.0', 8000))  # Listen on port 8000
+            server_socket.listen(1)
+            print("Waiting for a connection...")
 
-if __name__ == '__main__':
-    send_stream()
+            client_socket, addr = server_socket.accept()
+            print("Connection from:", addr)
+
+            try:
+                while True:
+                    with output.condition:
+                        output.condition.wait()
+                        frame = output.frame
+                    # Send frame length first
+                    client_socket.sendall(len(frame).to_bytes(4, byteorder='big'))
+                    # Send the actual frame
+                    client_socket.sendall(frame)
+
+            except ConnectionResetError:
+                print("Connection reset by peer, waiting for new connection...")
+
+            finally:
+                # Ensure sockets are closed properly after a client disconnect
+                client_socket.close()
+                server_socket.close()
+
+        except Exception as e:
+            print(f"An error occurred: {e}")
+        finally:
+            print("Restarting the server...")
+
+if __name__ == "__main__":
+    start_streaming_server()
