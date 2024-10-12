@@ -66,6 +66,7 @@ class VideoClient(QWidget):
         super().__init__()
 
         self.camera_label_text = camera_label
+        self.current_frame = None  # Store the current frame
 
         self.stack_layout = QStackedLayout()
         self.video_label = QLabel(self)
@@ -94,6 +95,8 @@ class VideoClient(QWidget):
         self.video_receiver.start()
 
     def update_frame(self, frame):
+        self.current_frame = frame  # Store the current frame for later comparison
+
         height, width, channels = frame.shape
         bytes_per_line = channels * width
         q_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format_RGB888)
@@ -108,6 +111,44 @@ class VideoClient(QWidget):
     def closeEvent(self, event):
         self.video_receiver.stop()
         event.accept()
+
+    # Add this method to compute and print the displacement in cm
+    def compute_shift(self, other_frame):
+        if self.current_frame is not None and other_frame is not None:
+            # Convert the frames to grayscale
+            gray1 = cv2.cvtColor(self.current_frame, cv2.COLOR_BGR2GRAY)
+            gray2 = cv2.cvtColor(other_frame, cv2.COLOR_BGR2GRAY)
+
+            # Use ORB detector to find key points and descriptors
+            orb = cv2.ORB_create()
+            kp1, des1 = orb.detectAndCompute(gray1, None)
+            kp2, des2 = orb.detectAndCompute(gray2, None)
+
+            # Use BFMatcher to match descriptors
+            bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+            matches = bf.match(des1, des2)
+
+            if len(matches) > 0:
+                # Sort the matches by distance (best matches first)
+                matches = sorted(matches, key=lambda x: x.distance)
+
+                # Get the matched keypoints
+                src_pts = np.float32([kp1[m.queryIdx].pt for m in matches])
+                dst_pts = np.float32([kp2[m.trainIdx].pt for m in matches])
+
+                # Calculate the displacement in pixels (X and Y axis)
+                displacement = np.mean(dst_pts - src_pts, axis=0)
+                dx, dy = displacement
+
+                # Assume a conversion factor from pixels to cm (you need to calibrate this based on your setup)
+                pixel_to_cm_factor = 0.05  # Example: 1 pixel = 0.05 cm
+
+                # Convert displacement to centimeters
+                dx_cm = dx * pixel_to_cm_factor
+                dy_cm = dy * pixel_to_cm_factor
+
+                print(f"Displacement from {self.camera_label_text}: ΔX = {dx_cm:.2f} cm, ΔY = {dy_cm:.2f} cm")
+
 
 
 class MainWindow(QMainWindow):
@@ -132,6 +173,11 @@ class MainWindow(QMainWindow):
         self.switch_timer.timeout.connect(self.handle_layout_switch)
         self.switch_timer.start(500)  # Check every 0.5 seconds
 
+        # Timer to compute shift between frames
+        self.shift_timer = QTimer(self)
+        self.shift_timer.timeout.connect(self.compute_shifts)
+        self.shift_timer.start(1000)  # Compute shift every 1 second
+
     def handle_layout_switch(self):
         if self.client1.video_receiver.is_connected and self.client2.video_receiver.is_connected:
             self.show_side_by_side()
@@ -153,6 +199,11 @@ class MainWindow(QMainWindow):
             if widget:
                 widget.setParent(None)
         self.layout.addWidget(client)
+
+    # Add method to compute shift between camera frames
+    def compute_shifts(self):
+        if self.client1.current_frame is not None and self.client2.current_frame is not None:
+            self.client1.compute_shift(self.client2.current_frame)
 
 
 if __name__ == "__main__":
