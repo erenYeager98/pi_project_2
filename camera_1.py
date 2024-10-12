@@ -18,7 +18,7 @@ class StreamingOutput(io.BufferedIOBase):
 def start_streaming_server():
     # Set up the camera
     picam2 = Picamera2()
-    picam2.configure(picam2.create_video_configuration(main={"size": (640, 480)},controls={"FrameRate":1}))
+    picam2.configure(picam2.create_video_configuration(main={"size": (640, 480)}))
     output = StreamingOutput()
     picam2.start_recording(JpegEncoder(), FileOutput(output))
 

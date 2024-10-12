@@ -3,93 +3,47 @@ import socket
 import struct
 from PyQt5.QtWidgets import QApplication, QLabel, QMainWindow, QVBoxLayout, QWidget, QHBoxLayout, QStackedLayout
 from PyQt5.QtGui import QPixmap, QImage, QFont
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 import numpy as np
 import cv2
 
 
-class VideoClient(QWidget):
+class VideoReceiver(QThread):
+    frame_received = pyqtSignal(np.ndarray)
+    error_occurred = pyqtSignal()
+
     def __init__(self, host, port, camera_label):
         super().__init__()
-
         self.host = host
         self.port = port
         self.camera_label_text = camera_label
-
-        # Set up a stacked layout to switch between the video stream and error message
-        self.stack_layout = QStackedLayout()
-
-        # Label for displaying the video frames
-        self.video_label = QLabel(self)
-        self.video_label.setAlignment(Qt.AlignCenter)
-
-        # Label for showing an error message if the camera is not available
-        self.error_label = QLabel(f"{camera_label} error")
-        self.error_label.setFont(QFont('Arial', 24))
-        self.error_label.setStyleSheet('color: red')
-        self.error_label.setAlignment(Qt.AlignCenter)
-
-        # Stack video label and error label
-        self.stack_layout.addWidget(self.video_label)
-        self.stack_layout.addWidget(self.error_label)
-
-        layout = QVBoxLayout()
-        # Add camera label
-        self.camera_label = QLabel(camera_label)
-        self.camera_label.setFont(QFont('Arial', 16))
-        self.camera_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.camera_label)
-
-        # Add stacked layout to the widget
-        layout.addLayout(self.stack_layout)
-        self.setLayout(layout)
-
-        # Initialize socket and connection state
-        self.client_socket = None
         self.is_connected = False
+        self.client_socket = None
+        self.running = True  # Control the thread execution
 
-        # Timer for trying to reconnect and receiving frames
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.receive_frame)
-        self.timer.start(1000)  # Start trying to connect every 1 second
+    def run(self):
+        while self.running:
+            try:
+                if not self.is_connected:
+                    self.connect_to_server()
 
-    def receive_frame(self):
-        try:
-            if not self.is_connected:
-                self.connect_to_server()
+                raw_length = self.client_socket.recv(4)
+                if not raw_length:
+                    raise ConnectionError("No frame length received")
 
-            # First receive the length of the frame
-            raw_length = self.client_socket.recv(4)
-            if not raw_length:
-                raise ConnectionError("No frame length received")
+                frame_length = struct.unpack('>I', raw_length)[0]
+                frame_data = b''
+                while len(frame_data) < frame_length:
+                    frame_data += self.client_socket.recv(frame_length - len(frame_data))
 
-            frame_length = struct.unpack('>I', raw_length)[0]
-
-            # Then receive the actual frame
-            frame_data = b''
-            while len(frame_data) < frame_length:
-                frame_data += self.client_socket.recv(frame_length - len(frame_data))
-
-            # Convert the frame to a numpy array
-            np_frame = np.frombuffer(frame_data, dtype=np.uint8)
-
-            # Decode the frame using OpenCV
-            frame = cv2.imdecode(np_frame, cv2.IMREAD_COLOR)
-
-            # Convert the frame to QImage and display it in the PyQt5 window
-            height, width, channels = frame.shape
-            bytes_per_line = channels * width
-            q_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format_RGB888)
-            pixmap = QPixmap.fromImage(q_image)
-
-            # Update the label with the new frame
-            self.video_label.setPixmap(pixmap)
-            self.stack_layout.setCurrentWidget(self.video_label)  # Show the video
-
-        except Exception as e:
-            print(f"Error receiving frame from {self.camera_label_text}: {e}")
-            # self.stack_layout.setCurrentWidget(self.error_label)  # Show the error label
-            self.is_connected = False
+                np_frame = np.frombuffer(frame_data, dtype=np.uint8)
+                frame = cv2.imdecode(np_frame, cv2.IMREAD_COLOR)
+                if frame is not None:
+                    self.frame_received.emit(frame)
+            except Exception as e:
+                print(f"Error receiving frame from {self.camera_label_text}: {e}")
+                self.error_occurred.emit()
+                self.is_connected = False
 
     def connect_to_server(self):
         try:
@@ -99,7 +53,61 @@ class VideoClient(QWidget):
             print(f"Connected to {self.camera_label_text}")
         except Exception as e:
             print(f"Failed to connect to {self.camera_label_text} at {self.host}:{self.port}")
-            self.stack_layout.setCurrentWidget(self.error_label)  # Show the error label
+            self.error_occurred.emit()
+
+    def stop(self):
+        self.running = False
+        if self.client_socket:
+            self.client_socket.close()
+
+
+class VideoClient(QWidget):
+    def __init__(self, host, port, camera_label):
+        super().__init__()
+
+        self.camera_label_text = camera_label
+
+        self.stack_layout = QStackedLayout()
+        self.video_label = QLabel(self)
+        self.video_label.setAlignment(Qt.AlignCenter)
+
+        self.error_label = QLabel(f"{camera_label} error")
+        self.error_label.setFont(QFont('Arial', 24))
+        self.error_label.setStyleSheet('color: red')
+        self.error_label.setAlignment(Qt.AlignCenter)
+
+        self.stack_layout.addWidget(self.video_label)
+        self.stack_layout.addWidget(self.error_label)
+
+        layout = QVBoxLayout()
+        self.camera_label = QLabel(camera_label)
+        self.camera_label.setFont(QFont('Arial', 16))
+        self.camera_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.camera_label)
+        layout.addLayout(self.stack_layout)
+        self.setLayout(layout)
+
+        # Start the video receiver thread
+        self.video_receiver = VideoReceiver(host, port, camera_label)
+        self.video_receiver.frame_received.connect(self.update_frame)
+        self.video_receiver.error_occurred.connect(self.show_error)
+        self.video_receiver.start()
+
+    def update_frame(self, frame):
+        height, width, channels = frame.shape
+        bytes_per_line = channels * width
+        q_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(q_image)
+
+        self.video_label.setPixmap(pixmap)
+        self.stack_layout.setCurrentWidget(self.video_label)  # Show the video
+
+    def show_error(self):
+        self.stack_layout.setCurrentWidget(self.error_label)
+
+    def closeEvent(self, event):
+        self.video_receiver.stop()
+        event.accept()
 
 
 class MainWindow(QMainWindow):
@@ -107,40 +115,32 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.setWindowTitle("Dual Video Stream")
-        self.setGeometry(100, 100, 1280, 720)  # Adjust the window size
+        self.setGeometry(100, 100, 1280, 720)
 
-        # Create two VideoClient widgets for two different servers
-        self.client1 = VideoClient(host1, port1, "Camera 1")  # First server stream
-        self.client2 = VideoClient(host2, port2, "Camera 2")  # Second server stream
+        self.client1 = VideoClient(host1, port1, "Camera 1")
+        self.client2 = VideoClient(host2, port2, "Camera 2")
 
-        # Set up a horizontal layout to display both streams side by side
         self.layout = QHBoxLayout()
-        self.layout.addWidget(self.client1)  # Add the first video stream
-        self.layout.addWidget(self.client2)  # Add the second video stream
+        self.layout.addWidget(self.client1)
+        self.layout.addWidget(self.client2)
 
-        # Central container for the window
         self.container = QWidget()
         self.container.setLayout(self.layout)
         self.setCentralWidget(self.container)
 
-        # Timer to handle switching layout when one of the streams fails
         self.switch_timer = QTimer(self)
         self.switch_timer.timeout.connect(self.handle_layout_switch)
-        self.switch_timer.start(1000)  # Check every second
+        self.switch_timer.start(500)  # Check every 0.5 seconds
 
     def handle_layout_switch(self):
-        # If both clients are connected, show side-by-side layout
-        if self.client1.is_connected and self.client2.is_connected:
+        if self.client1.video_receiver.is_connected and self.client2.video_receiver.is_connected:
             self.show_side_by_side()
-        # If only Camera 1 is connected, show Camera 1 full screen
-        elif self.client1.is_connected and not self.client2.is_connected:
+        elif self.client1.video_receiver.is_connected:
             self.show_single_camera(self.client1)
-        # If only Camera 2 is connected, show Camera 2 full screen
-        elif not self.client1.is_connected and self.client2.is_connected:
+        elif self.client2.video_receiver.is_connected:
             self.show_single_camera(self.client2)
-        # If both are not connected, keep showing error messaes
         else:
-            self.show_side_by_side()  # Default to side-by-side with error messages
+            self.show_side_by_side()
 
     def show_side_by_side(self):
         if self.layout.count() == 1:
@@ -148,31 +148,22 @@ class MainWindow(QMainWindow):
             self.layout.addWidget(self.client2)
 
     def show_single_camera(self, client):
-        # Remove other widgets if needed
         while self.layout.count() > 0:
             widget = self.layout.takeAt(0).widget()
             if widget:
                 widget.setParent(None)
-
-        # Add the single camera
         self.layout.addWidget(client)
 
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
 
-    # Replace with the actual IP addresses and ports of the two servers
-    host1 = "192.168.29.23"  # First server's IP address
-    port1 = 8000                  # First server's port
+    host1 = "192.168.184.117"
+    port1 = 8000
+    host2 = "192.168.184.48"
+    port2 = 8000
 
-    host2 = "192.168.29.122"  # Second server's IP address
-    port2 = 8000                  # Second server's port
-
-    # Create the main window with two video streams
     window = MainWindow(host1, port1, host2, port2)
-
-    # Show the window
     window.show()
 
-    # Run the PyQt5 event loop
     sys.exit(app.exec_())
