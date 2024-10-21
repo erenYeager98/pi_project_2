@@ -112,7 +112,7 @@ class VideoClient(QWidget):
         self.video_receiver.stop()
         event.accept()
 
-    # Add this method to compute and print the displacement in cm
+    # Add this method to compute and return the displacement in cm
     def compute_shift(self, other_frame):
         if self.current_frame is not None and other_frame is not None:
             # Convert the frames to grayscale
@@ -123,6 +123,10 @@ class VideoClient(QWidget):
             orb = cv2.ORB_create()
             kp1, des1 = orb.detectAndCompute(gray1, None)
             kp2, des2 = orb.detectAndCompute(gray2, None)
+
+            # Check if descriptors are valid (not None)
+            if des1 is None or des2 is None:
+                return None, None
 
             # Use BFMatcher to match descriptors
             bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
@@ -147,8 +151,11 @@ class VideoClient(QWidget):
                 dx_cm = dx * pixel_to_cm_factor
                 dy_cm = dy * pixel_to_cm_factor
 
-                print(f"Displacement from {self.camera_label_text}: ΔX = {dx_cm:.2f} cm, ΔY = {dy_cm:.2f} cm")
-
+                return dx_cm, dy_cm
+            else:
+                return None, None
+        else:
+            return None, None
 
 
 class MainWindow(QMainWindow):
@@ -161,57 +168,44 @@ class MainWindow(QMainWindow):
         self.client1 = VideoClient(host1, port1, "Camera 1")
         self.client2 = VideoClient(host2, port2, "Camera 2")
 
-        self.layout = QHBoxLayout()
-        self.layout.addWidget(self.client1)
-        self.layout.addWidget(self.client2)
+        self.layout = QVBoxLayout()  # Changed from QHBoxLayout to QVBoxLayout
+        self.cameras_layout = QHBoxLayout()  # For the camera streams
+        self.cameras_layout.addWidget(self.client1)
+        self.cameras_layout.addWidget(self.client2)
+
+        # Label to display the displacement information
+        self.displacement_label = QLabel("Displacement: ΔX = N/A cm, ΔY = N/A cm")
+        self.displacement_label.setFont(QFont('Arial', 16))
+        self.displacement_label.setAlignment(Qt.AlignCenter)
+
+        # Add the camera layout and the displacement label to the main layout
+        self.layout.addLayout(self.cameras_layout)
+        self.layout.addWidget(self.displacement_label)
 
         self.container = QWidget()
         self.container.setLayout(self.layout)
         self.setCentralWidget(self.container)
-
-        self.switch_timer = QTimer(self)
-        self.switch_timer.timeout.connect(self.handle_layout_switch)
-        self.switch_timer.start(500)  # Check every 0.5 seconds
 
         # Timer to compute shift between frames
         self.shift_timer = QTimer(self)
         self.shift_timer.timeout.connect(self.compute_shifts)
         self.shift_timer.start(1000)  # Compute shift every 1 second
 
-    def handle_layout_switch(self):
-        if self.client1.video_receiver.is_connected and self.client2.video_receiver.is_connected:
-            self.show_side_by_side()
-        elif self.client1.video_receiver.is_connected:
-            self.show_single_camera(self.client1)
-        elif self.client2.video_receiver.is_connected:
-            self.show_single_camera(self.client2)
-        else:
-            self.show_side_by_side()
-
-    def show_side_by_side(self):
-        if self.layout.count() == 1:
-            self.layout.addWidget(self.client1)
-            self.layout.addWidget(self.client2)
-
-    def show_single_camera(self, client):
-        while self.layout.count() > 0:
-            widget = self.layout.takeAt(0).widget()
-            if widget:
-                widget.setParent(None)
-        self.layout.addWidget(client)
-
-    # Add method to compute shift between camera frames
+    # Add method to compute shift between camera frames and update the label
     def compute_shifts(self):
-        if self.client1.current_frame is not None and self.client2.current_frame is not None:
-            self.client1.compute_shift(self.client2.current_frame)
+        dx_cm, dy_cm = self.client1.compute_shift(self.client2.current_frame)
+        if dx_cm is not None and dy_cm is not None:
+            self.displacement_label.setText(f"Displacement: ΔX = {dx_cm:.2f} cm, ΔY = {dy_cm:.2f} cm")
+        else:
+            self.displacement_label.setText("Cannot display displacement due to insufficient data from one or both cameras.")
 
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
 
-    host1 = "192.168.184.117"
+    host1 = "192.168.184.48"
     port1 = 8000
-    host2 = "192.168.184.48"
+    host2 = "192.168.184.3"
     port2 = 8000
 
     window = MainWindow(host1, port1, host2, port2)
