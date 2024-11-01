@@ -61,6 +61,24 @@ class VideoReceiver(QThread):
             self.client_socket.close()
 
 
+class ReconnectionThread(QThread):
+    def __init__(self, video_receiver):
+        super().__init__()
+        self.video_receiver = video_receiver
+        self.attempt_reconnect = True
+
+    def run(self):
+        while self.attempt_reconnect:
+            if not self.video_receiver.is_connected:
+                print(f"Attempting to reconnect {self.video_receiver.camera_label_text}")
+                self.video_receiver.connect_to_server()
+            self.sleep(5)  # Try reconnecting every 5 seconds
+
+    def stop(self):
+        self.attempt_reconnect = False
+        self.wait()
+
+
 class VideoClient(QWidget):
     def __init__(self, host, port, camera_label):
         super().__init__()
@@ -94,6 +112,10 @@ class VideoClient(QWidget):
         self.video_receiver.error_occurred.connect(self.show_error)
         self.video_receiver.start()
 
+        # Start the reconnection thread for this client
+        self.reconnection_thread = ReconnectionThread(self.video_receiver)
+        self.reconnection_thread.start()
+
     def update_frame(self, frame):
         self.current_frame = frame
 
@@ -105,28 +127,12 @@ class VideoClient(QWidget):
         self.video_label.setPixmap(pixmap)
         self.stack_layout.setCurrentWidget(self.video_label)
 
-    # def update_frame(self, frame):
-    #     self.current_frame = frame  # Store the current frame for later comparison
-
-    #     # Scale the frame to occupy 85% of the widget's available space
-    #     target_width = int(self.width() * 0.85)
-    #     target_height = int(self.height() * 0.85)
-
-    #     # Resize the frame for display
-    #     height, width, channels = frame.shape
-    #     bytes_per_line = channels * width
-    #     q_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format_RGB888)
-    #     pixmap = QPixmap.fromImage(q_image).scaled(target_width, target_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-
-    #     # Set the scaled pixmap to the label
-    #     self.video_label.setPixmap(pixmap)
-    #     self.stack_layout.setCurrentWidget(self.video_label)  # Show the video
-
     def show_error(self):
         self.stack_layout.setCurrentWidget(self.error_label)
 
     def closeEvent(self, event):
         self.video_receiver.stop()
+        self.reconnection_thread.stop()
         event.accept()
 
     def compute_shift(self, other_frame):
@@ -171,7 +177,6 @@ class MainWindow(QMainWindow):
     def __init__(self, host1, port1, host2, port2):
         super().__init__()
 
-        # Set window flags to remove decorations and start maximized
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
         self.showMaximized()
 
@@ -198,29 +203,15 @@ class MainWindow(QMainWindow):
         self.shift_timer.timeout.connect(self.compute_shifts)
         self.shift_timer.start(1000)
 
-    # def compute_shifts(self):
-    #     if self.client1.current_frame is not None and self.client2.current_frame is not None:
-    #         dx_cm, dy_cm = self.client1.compute_shift(self.client2.current_frame)
-    #         if dx_cm is not None and dy_cm is not None:
-    #             self.displacement_label.setText(f"Displacement: ΔX = {dx_cm:.2f} cm, ΔY = {dy_cm:.2f} cm")
-    #         else:
-    #             self.displacement_label.setText("Displacement: Cannot calculate due to insufficient data.")
-    #     else:
-    #         self.displacement_label.setText("Displacement: Cannot calculate due to disconnected camera(s).")
-        
     def compute_shifts(self):
-        # Check if both clients are connected and have current frames
         if self.client1.is_connected() and self.client2.is_connected() and \
            self.client1.current_frame is not None and self.client2.current_frame is not None:
-            # Calculate displacement
             dx_cm, dy_cm = self.client1.compute_shift(self.client2.current_frame)
             if dx_cm is not None and dy_cm is not None:
                 self.displacement_label.setText(f"Displacement: ΔX = {dx_cm:.2f} cm, ΔY = {dy_cm:.2f} cm")
             else:
-                # Show warning if unable to compute displacement
                 self.displacement_label.setText("Cannot display displacement due to insufficient data from one or both cameras.")
         else:
-            # Show warning if either camera is not connected
             self.displacement_label.setText("Cannot display displacement: one or both cameras are disconnected.")
 
 
