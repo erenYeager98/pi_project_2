@@ -6,20 +6,27 @@ from PyQt5.QtGui import QPixmap, QImage, QFont
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 import numpy as np
 import cv2
+from PyQt5.QtCore import QDateTime
 
 
 class VideoReceiver(QThread):
     frame_received = pyqtSignal(np.ndarray)
     error_occurred = pyqtSignal()
 
-    def __init__(self, host, port, camera_label):
+    def __init__(self, host, port, camera_label, timeout=3):
         super().__init__()
         self.host = host
         self.port = port
         self.camera_label_text = camera_label
+        self.timeout = timeout
         self.is_connected = False
         self.client_socket = None
         self.running = True
+        self.last_frame_time = None
+
+        self.heartbeat_timer = QTimer()
+        self.heartbeat_timer.timeout.connect(self.check_frame_timeout)
+        self.heartbeat_timer.start(timeout * 1000)  
 
     def run(self):
         while self.running:
@@ -36,10 +43,10 @@ class VideoReceiver(QThread):
                 while len(frame_data) < frame_length:
                     frame_data += self.client_socket.recv(frame_length - len(frame_data))
 
-                np_frame = np.frombuffer(frame_data, dtype=np.uint8)
-                frame = cv2.imdecode(np_frame, cv2.IMREAD_COLOR)
-                if frame is not None:
-                    self.frame_received.emit(frame)
+                self.last_frame_time = QDateTime.currentDateTime()
+
+                self.process_frame(frame_data)
+
             except Exception as e:
                 print(f"Error receiving frame from {self.camera_label_text}: {e}")
                 self.error_occurred.emit()
@@ -55,10 +62,23 @@ class VideoReceiver(QThread):
             print(f"Failed to connect to {self.camera_label_text} at {self.host}:{self.port}")
             self.error_occurred.emit()
 
+    def process_frame(self, frame_data):
+        np_frame = np.frombuffer(frame_data, dtype=np.uint8)
+        frame = cv2.imdecode(np_frame, cv2.IMREAD_COLOR)
+        if frame is not None:
+            self.frame_received.emit(frame)
+
+    def check_frame_timeout(self):
+        if self.last_frame_time and self.last_frame_time.msecsTo(QDateTime.currentDateTime()) > self.timeout * 1000:
+            print(f"Frame timeout detected for {self.camera_label_text}. Reconnecting...")
+            self.is_connected = False
+            self.connect_to_server()
+
     def stop(self):
         self.running = False
         if self.client_socket:
             self.client_socket.close()
+        self.heartbeat_timer.stop()
 
 
 class ReconnectionThread(QThread):
@@ -112,7 +132,7 @@ class VideoClient(QWidget):
         self.video_receiver.error_occurred.connect(self.show_error)
         self.video_receiver.start()
 
-        # Start the reconnection thread for this client
+
         self.reconnection_thread = ReconnectionThread(self.video_receiver)
         self.reconnection_thread.start()
 
