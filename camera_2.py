@@ -26,7 +26,8 @@ def start_streaming_server():
         try:
             # Set up a TCP server
             server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+
             server_socket.bind(('0.0.0.0', 8000))  # Listen on port 8000
             server_socket.listen(1)
             print("Waiting for a connection...")
