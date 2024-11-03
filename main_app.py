@@ -6,6 +6,41 @@ from PyQt5.QtGui import QPixmap, QImage, QFont
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 import numpy as np
 import cv2
+import sys
+import socket
+import struct
+from PyQt5.QtWidgets import QApplication, QLabel, QMainWindow, QVBoxLayout, QWidget, QHBoxLayout, QStackedLayout
+from PyQt5.QtGui import QPixmap, QImage, QFont
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
+import numpy as np
+import cv2
+import time
+
+
+class HeartbeatThread(QThread):
+    """Thread to send periodic heartbeat messages to the server."""
+    def __init__(self, video_receiver):
+        super().__init__()
+        self.video_receiver = video_receiver
+        self.running = True
+
+    def run(self):
+        while self.running:
+            if self.video_receiver.is_connected:
+                try:
+                    self.video_receiver.client_socket.sendall(b'HEARTBEAT')
+                    time.sleep(3) 
+                except (socket.timeout, ConnectionResetError, BrokenPipeError):
+                    print(f"Heartbeat failed for {self.video_receiver.camera_label_text}")
+                    self.video_receiver.is_connected = False
+                    self.video_receiver.error_occurred.emit()
+                    self.running = False 
+            else:
+                time.sleep(1) 
+
+    def stop(self):
+        self.running = False
+        self.wait()
 
 
 class VideoReceiver(QThread):
@@ -20,6 +55,7 @@ class VideoReceiver(QThread):
         self.is_connected = False
         self.client_socket = None
         self.running = True
+        self.heartbeat_thread = None  
 
     def run(self):
         while self.running:
@@ -51,6 +87,9 @@ class VideoReceiver(QThread):
             self.client_socket.connect((self.host, self.port))
             self.is_connected = True
             print(f"Connected to {self.camera_label_text}")
+
+            self.heartbeat_thread = HeartbeatThread(self)
+            self.heartbeat_thread.start()
         except Exception as e:
             print(f"Failed to connect to {self.camera_label_text} at {self.host}:{self.port}")
             self.error_occurred.emit()
@@ -59,6 +98,8 @@ class VideoReceiver(QThread):
         self.running = False
         if self.client_socket:
             self.client_socket.close()
+        if self.heartbeat_thread:
+            self.heartbeat_thread.stop()  
 
 
 class ReconnectionThread(QThread):
@@ -72,7 +113,7 @@ class ReconnectionThread(QThread):
             if not self.video_receiver.is_connected:
                 print(f"Attempting to reconnect {self.video_receiver.camera_label_text}")
                 self.video_receiver.connect_to_server()
-            self.sleep(5)  # Try reconnecting every 5 seconds
+            self.sleep(5)  
 
     def stop(self):
         self.attempt_reconnect = False
@@ -112,7 +153,6 @@ class VideoClient(QWidget):
         self.video_receiver.error_occurred.connect(self.show_error)
         self.video_receiver.start()
 
-        # Start the reconnection thread for this client
         self.reconnection_thread = ReconnectionThread(self.video_receiver)
         self.reconnection_thread.start()
 
