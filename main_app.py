@@ -1,20 +1,19 @@
 import sys
 import socket
 import struct
-from PyQt5.QtWidgets import QApplication, QLabel, QMainWindow, QVBoxLayout, QWidget, QHBoxLayout, QStackedLayout
-from PyQt5.QtGui import QPixmap, QImage, QFont
-from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
-import numpy as np
-import cv2
-import sys
-import socket
-import struct
+import subprocess
+import threading
 from PyQt5.QtWidgets import QApplication, QLabel, QMainWindow, QVBoxLayout, QWidget, QHBoxLayout, QStackedLayout
 from PyQt5.QtGui import QPixmap, QImage, QFont
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 import numpy as np
 import cv2
 import time
+import RPi.GPIO as GPIO 
+
+
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(17, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
 
 
 class HeartbeatThread(QThread):
@@ -29,14 +28,14 @@ class HeartbeatThread(QThread):
             if self.video_receiver.is_connected:
                 try:
                     self.video_receiver.client_socket.sendall(b'HEARTBEAT')
-                    time.sleep(3) 
+                    time.sleep(3)
                 except (socket.timeout, ConnectionResetError, BrokenPipeError):
                     print(f"Heartbeat failed for {self.video_receiver.camera_label_text}")
                     self.video_receiver.is_connected = False
                     self.video_receiver.error_occurred.emit()
-                    self.running = False 
+                    self.running = False
             else:
-                time.sleep(1) 
+                time.sleep(1)
 
     def stop(self):
         self.running = False
@@ -55,7 +54,7 @@ class VideoReceiver(QThread):
         self.is_connected = False
         self.client_socket = None
         self.running = True
-        self.heartbeat_thread = None  
+        self.heartbeat_thread = None
 
     def run(self):
         while self.running:
@@ -99,7 +98,7 @@ class VideoReceiver(QThread):
         if self.client_socket:
             self.client_socket.close()
         if self.heartbeat_thread:
-            self.heartbeat_thread.stop()  
+            self.heartbeat_thread.stop()
 
 
 class ReconnectionThread(QThread):
@@ -113,11 +112,19 @@ class ReconnectionThread(QThread):
             if not self.video_receiver.is_connected:
                 print(f"Attempting to reconnect {self.video_receiver.camera_label_text}")
                 self.video_receiver.connect_to_server()
-            self.sleep(5)  
+            self.sleep(5)
 
     def stop(self):
         self.attempt_reconnect = False
         self.wait()
+
+
+class GPIOShutdownThread(threading.Thread):
+    def run(self):
+        while True:
+            if GPIO.input(17) == GPIO.HIGH:
+                print("Shutdown button pressed. Shutting down the server...")
+                subprocess.run(["sudo", "shutdown", "now"])
 
 
 class VideoClient(QWidget):
@@ -145,7 +152,7 @@ class VideoClient(QWidget):
         self.camera_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.camera_label)
         layout.addLayout(self.stack_layout)
-        layout.setContentsMargins(0, 0, 0, 0)  
+        layout.setContentsMargins(0, 0, 0, 0)
         self.setLayout(layout)
 
         self.video_receiver = VideoReceiver(host, port, camera_label)
@@ -199,18 +206,17 @@ class VideoClient(QWidget):
                 dx, dy = displacement
 
                 pixel_to_cm_factor = 0.05
-                dx_cm = dx * pixel_to_cm_factor
-                dy_cm = dy * pixel_to_cm_factor
+                dx_cm = max(-99, min(99, dx * pixel_to_cm_factor)) 
+                dy_cm = max(-99, min(99, dy * pixel_to_cm_factor))  
 
                 return dx_cm, dy_cm
             else:
                 return None, None
         else:
             return None, None
-    
     def is_connected(self):
         return self.video_receiver.is_connected 
-            
+        
 
 
 class MainWindow(QMainWindow):
@@ -232,6 +238,12 @@ class MainWindow(QMainWindow):
         self.displacement_label.setFont(QFont('Arial', 16))
         self.displacement_label.setAlignment(Qt.AlignCenter)
 
+        self.logo_label = QLabel(self)
+        logo_pixmap = QPixmap("logo.jpg").scaled(150, 150, Qt.KeepAspectRatio)
+        self.logo_label.setPixmap(logo_pixmap)
+        self.logo_label.setAlignment(Qt.AlignRight | Qt.AlignTop)
+        self.layout.addWidget(self.logo_label)
+
         self.layout.addLayout(self.cameras_layout)
         self.layout.addWidget(self.displacement_label)
 
@@ -242,6 +254,10 @@ class MainWindow(QMainWindow):
         self.shift_timer = QTimer(self)
         self.shift_timer.timeout.connect(self.compute_shifts)
         self.shift_timer.start(1000)
+
+        Start GPIO shutdown monitoring thread
+        self.shutdown_thread = GPIOShutdownThread()
+        self.shutdown_thread.start()
 
     def compute_shifts(self):
         if self.client1.is_connected() and self.client2.is_connected() and \
@@ -258,9 +274,9 @@ class MainWindow(QMainWindow):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
 
-    host1 = "192.168.51.48"
+    host1 = "192.168.127.48"
     port1 = 8000
-    host2 = "192.168.51.3"
+    host2 = "192.168.127.3"
     port2 = 8000
 
     window = MainWindow(host1, port1, host2, port2)
