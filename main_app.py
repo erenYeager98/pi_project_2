@@ -127,13 +127,19 @@ class GPIOShutdownThread(threading.Thread):
                 subprocess.run(["sudo", "shutdown", "now"])
 
 
+
+
 class VideoClient(QWidget):
     def __init__(self, host, port, camera_label):
         super().__init__()
 
         self.camera_label_text = camera_label
         self.current_frame = None
+        self.shift_threshold_cm = 1.0  # Threshold to ignore shifts below 1 cm
+        self.previous_dx_cm = 0.0
+        self.previous_dy_cm = 0.0
 
+        # Layout setup
         self.stack_layout = QStackedLayout()
         self.video_label = QLabel(self)
         self.video_label.setAlignment(Qt.AlignCenter)
@@ -206,8 +212,19 @@ class VideoClient(QWidget):
                 dx, dy = displacement
 
                 pixel_to_cm_factor = 0.05
-                dx_cm = max(-99, min(99, dx * pixel_to_cm_factor)) 
-                dy_cm = max(-99, min(99, dy * pixel_to_cm_factor))  
+                dx_cm = dx * pixel_to_cm_factor
+                dy_cm = dy * pixel_to_cm_factor
+
+                # Apply threshold to reduce fluctuations within 1 cm range
+                if abs(dx_cm - self.previous_dx_cm) >= self.shift_threshold_cm:
+                    self.previous_dx_cm = dx_cm
+                else:
+                    dx_cm = self.previous_dx_cm
+
+                if abs(dy_cm - self.previous_dy_cm) >= self.shift_threshold_cm:
+                    self.previous_dy_cm = dy_cm
+                else:
+                    dy_cm = self.previous_dy_cm
 
                 return dx_cm, dy_cm
             else:
@@ -216,8 +233,7 @@ class VideoClient(QWidget):
             return None, None
     def is_connected(self):
         return self.video_receiver.is_connected 
-        
-
+            
 
 class MainWindow(QMainWindow):
     def __init__(self, host1, port1, host2, port2):
@@ -255,7 +271,6 @@ class MainWindow(QMainWindow):
         self.shift_timer.timeout.connect(self.compute_shifts)
         self.shift_timer.start(1000)
 
-        Start GPIO shutdown monitoring thread
         self.shutdown_thread = GPIOShutdownThread()
         self.shutdown_thread.start()
 
